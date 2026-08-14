@@ -3,262 +3,250 @@ import time
 import threading
 import urllib.parse
 import requests
+import logging
 import json
 from flask import Flask, jsonify
-from instagrapi import Client  # [web:16]
+from instagrapi import Client
 
-SESSION_ID_1 = os.getenv("SESSION_ID_1")
-SESSION_ID_2 = os.getenv("SESSION_ID_2")
-SESSION_ID_3 = os.getenv("SESSION_ID_3")
-SESSION_ID_4 = os.getenv("SESSION_ID_4")
-SESSION_ID_5 = os.getenv("SESSION_ID_5")
-SESSION_ID_6 = os.getenv("SESSION_ID_6")
-GROUPS_1 = os.getenv("GROUPS_1", "")
-GROUPS_2 = os.getenv("GROUPS_2", "")
-GROUPS_3 = os.getenv("GROUPS_3", "")
-GROUPS_4 = os.getenv("GROUPS_4", "")
-GROUPS_5 = os.getenv("GROUPS_5", "")
-GROUPS_6 = os.getenv("GROUPS_6", "")
+sessions = []
+
+i = 1
+while True:
+    value = os.getenv(f"SESSION_ID_{i}")
+    if not value:
+        break
+    sessions.append(value)
+    i += 1
+GROUP_ID = os.getenv("GROUP_ID", "").strip()
 MESSAGE_TEXT = os.getenv("MESSAGE_TEXT", "Hello 👋")
 SELF_URL = os.getenv("SELF_URL", "")
 NC_TITLES_RAW = os.getenv("NC_TITLES", "") 
 SPAM_START_OFFSET = int(os.getenv("SPAM_START_OFFSET", "1"))
-SPAM_GAP_BETWEEN_ACCOUNTS = int(os.getenv("SPAM_GAP_BETWEEN_ACCOUNTS", "40"))
 NC_START_OFFSET = int(os.getenv("NC_START_OFFSET", "1"))
-NC_ACC_GAP = int(os.getenv("NC_ACC_GAP", "180"))
-
-MSG_REFRESH_DELAY = int(os.getenv("MSG_REFRESH_DELAY", "1"))
-BURST_COUNT = int(os.getenv("BURST_COUNT", "1"))
 SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "60"))
 COOLDOWN_ON_ERROR = int(os.getenv("COOLDOWN_ON_ERROR", "300"))
 DOC_ID = os.getenv("DOC_ID", "29088580780787855")
 CSRF_TOKEN = os.getenv("CSRF_TOKEN", "")
 
+
+START_TIME = time.time()
 app = Flask(__name__)
-MAX_SESSION_LOGS = 200
-session_logs = {
-    "acc1": [],
-    "acc2": [],
-    "acc3": [],
-    "acc4": [],
-    "acc5": [],
-    "acc6": [],
-    "system": []
-}
 logs_lock = threading.Lock()
 
-def _push_log(session, msg):
-    if session not in session_logs:
-        session = "system"
-    with logs_lock:
-        session_logs[session].append(msg)
-        if len(session_logs[session]) > MAX_SESSION_LOGS:
-            session_logs[session].pop(0)
+logging.getLogger("werkzeug").disabled = True
+app.logger.disabled = True
 
+dashboard_status = {}
 
 def log(msg, session="system"):
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
     print(line, flush=True)
-    _push_log(session, msg)
 
+def update_dashboard(acc_name, key, value):
+    with logs_lock:
+
+        if acc_name not in dashboard_status:
+            return
+
+        if key == "log":
+
+            dashboard_status[acc_name].setdefault("logs", [])
+
+            dashboard_status[acc_name]["logs"].append(value)
+
+            if len(dashboard_status[acc_name]["logs"]) > 20:
+                dashboard_status[acc_name]["logs"].pop(0)
+
+        else:
+            dashboard_status[acc_name][key] = value
+
+@app.route("/")
+def health():
+    return jsonify({"status": "ok", "message": "Bot process alive"})
 
 @app.route("/dashboard")
 def dashboard():
-    return """
+
+    uptime = int(time.time() - START_TIME)
+
+    h = uptime // 3600
+    m = (uptime % 3600) // 60
+    s = uptime % 60
+
+    runtime = f"{h:02}:{m:02}:{s:02}"
+
+    with logs_lock:
+        cards = dict(dashboard_status)
+
+    active_cards = []
+
+    for acc in cards.values():
+        if acc and acc.get("username"):
+            active_cards.append(acc)
+
+    html = f"""
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
 <title>SINISTERS ⚡ SX⁷</title>
+
+<meta http-equiv="refresh" content="2">
+
 <style>
-    * { box-sizing: border-box; }
-    body {
-        margin: 0;
-        min-height: 100vh;
-        background:
-            radial-gradient(circle at 20% 0%, #182033 0%, transparent 35%),
-            radial-gradient(circle at 80% 0%, #101827 0%, transparent 35%),
-            #070a10;
-        color: #e8edf7;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
-    }
-    .wrap {
-        width: min(1100px, calc(100% - 28px));
-        margin: 0 auto;
-        padding: 34px 0 50px;
-    }
-    .header {
-        text-align: center;
-        padding: 20px 0 28px;
-    }
-    .title {
-        margin: 0;
-        font-size: clamp(28px, 5vw, 48px);
-        font-weight: 900;
-        letter-spacing: 3px;
-        text-shadow: 0 0 28px rgba(120, 150, 255, .25);
-    }
-    .sub {
-        margin-top: 8px;
-        color: #7f8ba3;
-        font-size: 12px;
-        letter-spacing: 2px;
-        text-transform: uppercase;
-    }
-    .logs {
-        display: flex;
-        flex-direction: column;
-        gap: 10px;
-    }
-    .log {
-        border: 1px solid #202938;
-        background: rgba(14, 18, 27, .88);
-        border-radius: 14px;
-        padding: 13px 16px;
-        box-shadow: 0 8px 28px rgba(0,0,0,.22);
-        animation: in .2s ease-out;
-    }
-    .log.sent { border-left: 3px solid #4aa3ff; }
-    .log.rename { border-left: 3px solid #b46cff; }
-    .log.ping { border-left: 3px solid #39d98a; }
-    .time {
-        color: #69758b;
-        font-size: 11px;
-        margin-bottom: 5px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }
-    .msg {
-        color: #e9eef8;
-        font-size: 14px;
-        line-height: 1.45;
-        word-break: break-word;
-    }
-    .empty {
-        text-align: center;
-        color: #657087;
-        border: 1px dashed #273043;
-        border-radius: 14px;
-        padding: 40px 20px;
-    }
-    @keyframes in {
-        from { opacity: 0; transform: translateY(5px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
+
+*{{
+margin:0;
+padding:0;
+box-sizing:border-box;
+}}
+
+body{{
+background:#f2f2f2;
+font-family:Consolas,monospace;
+padding:40px;
+}}
+
+.header{{
+text-align:center;
+font-size:42px;
+font-weight:bold;
+margin-bottom:8px;
+}}
+
+.runtime{{
+text-align:center;
+font-size:20px;
+margin-bottom:35px;
+}}
+
+.container{{
+display:flex;
+justify-content:center;
+flex-wrap:wrap;
+gap:25px;
+}}
+
+.card{{
+width:320px;
+height:760px;
+background:white;
+border:2px solid #111;
+border-radius:14px;
+padding:18px;
+box-shadow:0 8px 18px rgba(0,0,0,.18);
+display:flex;
+flex-direction:column;
+}}
+
+.username{{
+font-size:24px;
+font-weight:bold;
+text-align:center;
+padding-bottom:14px;
+border-bottom:2px solid #222;
+margin-bottom:8px;
+}}
+
+.status{{
+height:52px;
+display:flex;
+align-items:center;
+justify-content:center;
+font-size:18px;
+font-weight:bold;
+border-bottom:2px solid #222;
+margin-bottom:6px;
+}}
+
+.logs{{
+flex:1;
+display:flex;
+flex-direction:column;
+overflow:hidden;
+}}
+
+.logline{{
+height:31px;
+display:flex;
+align-items:center;
+padding:0 8px;
+font-size:15px;
+border-bottom:1px solid #e5e5e5;
+}}
+
+.logline:last-child{{
+border-bottom:none;
+}}
+
+.footer{{
+margin-top:35px;
+text-align:center;
+font-size:15px;
+font-weight:bold;
+}}
+
 </style>
+
 </head>
+
 <body>
-<div class="wrap">
-    <div class="header">
-        <h1 class="title">SINISTERS ⚡ SX⁷</h1>
-        <div class="sub">Live Activity Logs</div>
-    </div>
-    <div id="logs" class="logs">
-        <div class="empty">Waiting for logs...</div>
-    </div>
+
+<div class="header">
+SINISTERS ⚡ SX⁷
 </div>
 
-<script>
-function classify(s) {
-    if (/sent to|SENT/i.test(s)) return "sent";
-    if (/changed title \\(graphql\\)|graphql/i.test(s)) return "rename";
-    if (/Self ping/i.test(s)) return "ping";
-    return null;
-}
+<div class="runtime">
+RUNTIME ⏳ {runtime}
+</div>
 
-async function refreshLogs() {
-    try {
-        const r = await fetch("/status", {cache: "no-store"});
-        const data = await r.json();
-        const all = [];
+<div class="container">
+"""
 
-        for (const key of ["acc1","acc2","acc3","acc4","acc5","acc6"]) {
-            const d = data[key] || {};
-            for (const k of ["last_send_ok","last_title_ok"]) {
-                if (d[k]) all.push({text: d[k], type: classify(d[k])});
-            }
-        }
+    for acc in active_cards:
 
-        for (const s of (data.system_last || [])) {
-            all.push({text: s, type: classify(s)});
-        }
+        logs = acc.get("logs", [])
 
-        const filtered = all.filter(x => x.type).slice(-100);
-        const root = document.getElementById("logs");
+        if len(logs) > 20:
+            logs = logs[-20:]
 
-        if (!filtered.length) {
-            root.innerHTML = '<div class="empty">No matching logs yet.</div>';
-            return;
-        }
+        logs = logs + [""] * (20 - len(logs))
 
-        root.innerHTML = filtered.reverse().map(x => {
-            const m = x.text.match(/^\\[([^\\]]+)\\]\\s*(.*)$/);
-            const tm = m ? m[1] : "";
-            const body = m ? m[2] : x.text;
-            return `<div class="log ${x.type}">
-                <div class="time">${escapeHtml(tm)}</div>
-                <div class="msg">${escapeHtml(body)}</div>
-            </div>`;
-        }).join("");
-    } catch (e) {
-        document.getElementById("logs").innerHTML =
-            '<div class="empty">Dashboard temporarily unavailable.</div>';
-    }
-}
+        html += f"""
+<div class="card">
 
-function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => ({
-        "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"
-    }[c]));
-}
+<div class="username">
+{acc.get("username","-")}
+</div>
 
-refreshLogs();
-setInterval(refreshLogs, 2000);
-</script>
+<div class="status">
+{acc.get("status","❌ INACTIVE")}
+</div>
+
+<div class="logs">
+"""
+
+        for line in logs:
+            html += f'<div class="logline">{line}</div>'
+
+        html += """
+</div>
+
+</div>
+"""
+
+    html += f"""
+</div>
+
+<div class="footer">
+ACTIVE SESSIONS : {len(active_cards)}
+</div>
+
 </body>
 </html>
 """
 
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok", "message": "Bot process alive"})
-
-def summarize(lines):
-    rev = list(reversed(lines))
-    last_login = next((l for l in rev if "Logged in" in l), None)
-    last_send_ok = next((l for l in rev if "✅" in l and "sent to" in l), None)
-    last_send_err = next((l for l in rev if "Send failed" in l or "⚠ send failed" in l), None)
-    last_title_ok = next((l for l in rev if "changed title" in l and "📝" in l), None)
-    last_title_err = next((l for l in rev if "Title change" in l or "GraphQL title" in l), None)
-    return {
-        "last_login": last_login,
-        "last_send_ok": last_send_ok,
-        "last_send_error": last_send_err,
-        "last_title_ok": last_title_ok,
-        "last_title_error": last_title_err,
-    }
-
-@app.route("/status")
-def status():
-    with logs_lock:
-        acc1_logs = session_logs["acc1"][-80:]
-        acc2_logs = session_logs["acc2"][-80:]
-        acc3_logs = session_logs["acc3"][-80:]
-        acc4_logs = session_logs["acc4"][-80:]
-        acc5_logs = session_logs["acc5"][-80:]
-        acc6_logs = session_logs["acc6"][-80:]
-        system_last = session_logs["system"][-20:]
-
-    return jsonify({
-        "ok": True,
-        "acc1": summarize(acc1_logs),
-        "acc2": summarize(acc2_logs),
-        "acc3": summarize(acc3_logs),
-        "acc4": summarize(acc4_logs),
-        "acc5": summarize(acc5_logs),
-        "acc6": summarize(acc6_logs),
-        "system_last": system_last
-    })
+    return html
 
 def decode_session(session):
     if not session:
@@ -272,7 +260,7 @@ def login_session(session_id, name_hint=""):
     session_id = decode_session(session_id)
     try:
         cl = Client()
-        cl.login_by_sessionid(session_id)  # [web:16]
+        cl.login_by_sessionid(session_id)
         uname = getattr(cl, "username", None) or name_hint or "unknown"
         log(f"✅ Logged in {uname}", session=name_hint or "system")
         return cl
@@ -282,16 +270,28 @@ def login_session(session_id, name_hint=""):
 
 def safe_send_message(cl, gid, msg, acc_name):
     try:
-        cl.direct_send(msg, thread_ids=[int(gid)])  # [web:16]
+        cl.direct_send(msg, thread_ids=[int(gid)])
         log(f"✅ {getattr(cl,'username','?')} sent to {gid}", session=acc_name)
+
+        update_dashboard(
+            acc_name,
+            "log",
+            f"📨 SENT - {gid}"
+        )
+
         return True
     except Exception as e:
         log(f"⚠ Send failed ({getattr(cl,'username','?')}) -> {gid}: {e}", session=acc_name)
+        update_dashboard(
+            acc_name,
+            "log",
+            "❌ SENT FAILED"
+        )
         return False
 
 def safe_change_title_direct(cl, gid, new_title, acc_name):
     try:
-        tt = cl.direct_thread(int(gid))  # [web:16]
+        tt = cl.direct_thread(int(gid))
         try:
             tt.update_title(new_title)
             log(
@@ -333,11 +333,23 @@ def safe_change_title_direct(cl, gid, new_title, acc_name):
                     f"📝 {getattr(cl,'username','?')} changed title (graphql) for {gid} -> {new_title}",
                     session=acc_name
                 )
+
+                update_dashboard(
+                    acc_name,
+                    "log",
+                    f"⚡ {new_title}"
+                )
                 return True
             except Exception as e:
                 log(
                     f"⚠ Title change unexpected response for {gid}: {e} (status {resp.status_code})",
                     session=acc_name
+                )
+
+                update_dashboard(
+                    acc_name,
+                    "log",
+                    "❌ RENAME FAILED"
                 )
                 return False
         except Exception as e:
@@ -347,59 +359,46 @@ def safe_change_title_direct(cl, gid, new_title, acc_name):
         log(f"⚠ Unexpected fallback error for title change {gid}: {e}", session=acc_name)
         return False
 
-def spam_account_loop(acc):
-    """Independent message timer for one account: one GC every 40 seconds."""
-    acc_name = acc["name"]
-    gc_index = 0
+def spam_loop(accounts, groups):
+    if not groups:
+        log("⚠ No groups for messaging loop.", session="system")
+        return
 
     time.sleep(SPAM_START_OFFSET)
 
+    active_accounts = [a for a in accounts if a["client"]]
+
+    if not active_accounts:
+        return
+
+    delay = 45 / len(active_accounts)
+
     while True:
-        try:
+
+        for acc in active_accounts:
+
             if acc.get("cooldown_until", 0) > time.time():
-                log(f"⏳ {acc_name} cooling down", session=acc_name)
-            elif not acc["active"] or not acc["client"]:
-                log(f"⏭ {acc_name} inactive, skipping message slot", session=acc_name)
-            elif not acc["groups"]:
-                log(f"⏭ {acc_name} has no groups", session=acc_name)
-            else:
-                cl = acc["client"]
-                gid = acc["groups"][gc_index % len(acc["groups"])]
+                continue
 
-                for _ in range(BURST_COUNT):
-                    ok = safe_send_message(cl, gid, MESSAGE_TEXT, acc_name)
-                    if not ok:
-                        log(
-                            f"⛔ {acc_name} failed, applying cooldown for message loop",
-                            session=acc_name
-                        )
-                        acc["cooldown_until"] = time.time() + COOLDOWN_ON_ERROR
-                        break
+            try:
+                ok = safe_send_message(
+                    acc["client"],
+                    groups[0],
+                    MESSAGE_TEXT,
+                    acc["name"]
+                )
 
-                    if MSG_REFRESH_DELAY > 0:
-                        time.sleep(MSG_REFRESH_DELAY)
+                if not ok:
+                    acc["cooldown_until"] = time.time() + COOLDOWN_ON_ERROR
 
-                if acc.get("cooldown_until", 0) <= time.time():
-                    log(
-                        f"📨 {getattr(cl, 'username', '?')} SENT — GC "
-                        f"{(gc_index % len(acc['groups'])) + 1} [{gid}]",
-                        session=acc_name
-                    )
+            except Exception as e:
+                log(
+                    f"❌ Exception in {acc['name']} message loop: {e}",
+                    session=acc["name"]
+                )
+                acc["cooldown_until"] = time.time() + COOLDOWN_ON_ERROR
 
-                gc_index = (gc_index + 1) % len(acc["groups"])
-
-        except Exception as e:
-            log(f"❌ Exception in {acc_name} message loop: {e}", session=acc_name)
-            acc["cooldown_until"] = time.time() + COOLDOWN_ON_ERROR
-
-        time.sleep(SPAM_GAP_BETWEEN_ACCOUNTS)
-
-
-def spam_loop(accounts):
-    """Start one independent 40-second GC timer for every account."""
-    for acc in accounts:
-        threading.Thread(target=spam_account_loop, args=(acc,), daemon=True).start()
-
+            time.sleep(delay)
 
 def parse_nc_titles():
     """
@@ -408,84 +407,54 @@ def parse_nc_titles():
     """
     base = [t.strip() for t in NC_TITLES_RAW.split(",") if t.strip()]
     default_title = MESSAGE_TEXT[:40] or "NC"
-    while len(base) < 6:
-        base.append(default_title)
-    return base[:6]
+    if not base:
+        base = [default_title]
+    return base
 
-def nc_account_loop(acc, titles_map):
-    """Independent rename timer for one account: one GC every 180 seconds."""
-    acc_name = acc["name"]
-    gc_index = 0
-    nc_index = 0
+def nc_loop(accounts, groups, titles_map):
+    if not groups:
+        log("⚠ No groups for title loop.", session="system")
+        return
+
     per_account_titles = parse_nc_titles()
 
     time.sleep(NC_START_OFFSET)
 
-    while True:
-        try:
-            if acc.get("cooldown_until", 0) > time.time():
-                log(f"⏳ {acc_name} cooling down", session=acc_name)
-            elif not acc["active"] or not acc["client"]:
-                log(f"⏭ {acc_name} inactive, skipping nc slot", session=acc_name)
-            elif not acc["groups"]:
-                log(f"⏭ {acc_name} has no groups", session=acc_name)
-            else:
-                cl = acc["client"]
-                gid = acc["groups"][gc_index % len(acc["groups"])]
+    active_accounts = [a for a in accounts if a["client"]]
 
-                titles = (
-                    titles_map.get(str(gid))
-                    or titles_map.get(int(gid))
-                    if str(gid).isdigit()
-                    else titles_map.get(str(gid))
+    if not active_accounts:
+        return
+
+    delay = 180 / len(active_accounts)
+
+    while True:
+
+        for i, acc in enumerate(active_accounts):
+
+            if acc.get("cooldown_until", 0) > time.time():
+                continue
+
+            try:
+                title = per_account_titles[i % len(per_account_titles)]
+
+                ok = safe_change_title_direct(
+                    acc["client"],
+                    groups[0],
+                    title,
+                    acc["name"]
                 )
 
-                if not titles:
-                    titles = per_account_titles
-
-                if not titles:
-                    titles = [MESSAGE_TEXT[:40] or "NC"]
-
-                t = titles[nc_index % len(titles)]
-
-                ok = safe_change_title_direct(cl, gid, t, acc_name)
-
                 if not ok:
-                    log(
-                        f"⛔ {acc_name} failed, applying cooldown for nc loop",
-                        session=acc_name
-                    )
                     acc["cooldown_until"] = time.time() + COOLDOWN_ON_ERROR
-                else:
-                    log(
-                        f"💠 {getattr(cl, 'username', '?')} NC"
-                        f"{(nc_index % len(titles)) + 1} — GC "
-                        f"{(gc_index % len(acc['groups'])) + 1} [{gid}] -> {t}",
-                        session=acc_name
-                    )
 
-                # Move to the next GC. After the last GC, start GC1 again
-                # and advance to the next NC title.
-                gc_index = (gc_index + 1) % len(acc["groups"])
-                if gc_index == 0:
-                    nc_index = (nc_index + 1) % len(titles)
+            except Exception as e:
+                log(
+                    f"❌ Exception in {acc['name']} rename loop: {e}",
+                    session=acc["name"]
+                )
+                acc["cooldown_until"] = time.time() + COOLDOWN_ON_ERROR
 
-        except Exception as e:
-            log(f"❌ Exception in {acc_name} nc loop: {e}", session=acc_name)
-            acc["cooldown_until"] = time.time() + COOLDOWN_ON_ERROR
-
-        time.sleep(NC_ACC_GAP)
-
-
-def nc_loop(accounts, titles_map):
-    """Start one independent 180-second GC timer for every account."""
-    for acc in accounts:
-        threading.Thread(
-            target=nc_account_loop,
-            args=(acc, titles_map),
-            daemon=True
-        ).start()
-
+            time.sleep(delay)
 
 def self_ping_loop():
     while True:
@@ -498,27 +467,12 @@ def self_ping_loop():
         time.sleep(SELF_PING_INTERVAL)
 
 def start_bot():
-    log(
-        "STARTUP: "
-        f"SESSION_ID_1={repr(SESSION_ID_1)}, "
-        f"SESSION_ID_2={repr(SESSION_ID_2)}, "
-        f"SESSION_ID_3={repr(SESSION_ID_3)}, "
-        f"SESSION_ID_4={repr(SESSION_ID_4)}, "
-        f"SESSION_ID_5={repr(SESSION_ID_5)}, "
-        f"SESSION_ID_6={repr(SESSION_ID_6)}, "
-        f"MESSAGE_TEXT={repr(MESSAGE_TEXT)}, "
-        f"NC_TITLES={repr(NC_TITLES_RAW)}",
-        session="system"
-    )
+    all_sessions = [decode_session(s) for s in sessions]
+    if not GROUP_ID:
+        log("❌ GROUP_ID is empty", session="system")
+        return
 
-    sessions = [
-        (decode_session(SESSION_ID_1), GROUPS_1),
-        (decode_session(SESSION_ID_2), GROUPS_2),
-        (decode_session(SESSION_ID_3), GROUPS_3),
-        (decode_session(SESSION_ID_4), GROUPS_4),
-        (decode_session(SESSION_ID_5), GROUPS_5),
-        (decode_session(SESSION_ID_6), GROUPS_6),
-    ]
+    groups = [GROUP_ID]
 
     titles_map = {}
     raw_titles = os.getenv("GROUP_TITLES", "")
@@ -529,45 +483,73 @@ def start_bot():
             log(f"⚠ GROUP_TITLES JSON parse error: {e}. Using fallback titles.", session="system")
 
     accounts = []
-    for i, (s, groups_raw) in enumerate(sessions, 1):
+    for i, s in enumerate(all_sessions, 1):
+        
         acc_name = f"acc{i}"
-        groups = [g.strip() for g in groups_raw.split(",") if g.strip()]
+        dashboard_status.setdefault(acc_name, {})
         if not s:
-            log(f"⚠ No session for {acc_name}, keeping slot inactive", session=acc_name)
-            accounts.append({"name": acc_name, "client": None, "groups": groups, "active": False, "cooldown_until": 0})
+            accounts.append({
+                "name": acc_name,
+                "display_name": f"USER {i}",
+                "client": None,
+                "active": False,
+                "cooldown_until": 0
+            })
+            continue
+
+        if "|" in s:
+            username, sessionid = s.split("|", 1)
+        else:
+            username = f"USER {i}"
+            sessionid = s
+            acc_name = f"acc{i}"
+
+        if not sessionid:
+            accounts.append({"name": acc_name, "display_name": username or f"USER {i}", "client": None, "active": False, "cooldown_until": 0})
             continue
 
         log(f"🔐 Logging in account {i}...", session="system")
-        cl = login_session(s, acc_name)
+        cl = login_session(sessionid, acc_name)
+
         if cl:
-            accounts.append({"name": acc_name, "client": cl, "groups": groups, "active": True, "cooldown_until": 0})
+
+            update_dashboard(acc_name, "username", username)
+            update_dashboard(acc_name, "status", "✔ ACTIVE")
+            update_dashboard(acc_name, "sent", "Waiting...")
+            update_dashboard(acc_name, "rename", "Waiting...")
+
+            accounts.append({"name": acc_name, "display_name": username, "client": cl, "active": True, "cooldown_until": 0})
+
         else:
-            log(f"⚠ {acc_name} login failed, keeping slot inactive", session=acc_name)
-            accounts.append({"name": acc_name, "client": None, "groups": groups, "active": False, "cooldown_until": 0})
+            update_dashboard(acc_name, "username", username)
+            update_dashboard(acc_name, "status", "❌ INACTIVE")
+            update_dashboard(acc_name, "sent", "-")
+            update_dashboard(acc_name, "rename", "-")
+
+            accounts.append({"name": acc_name, "display_name": username, "client": None, "active": False, "cooldown_until": 0})
 
     if not any(a["client"] for a in accounts):
         log("❌ No accounts logged in, aborting.", session="system")
         return
 
     try:
-        t1 = threading.Thread(target=spam_loop, args=(accounts,), daemon=True)
+        t1 = threading.Thread(target=spam_loop, args=(accounts, groups), daemon=True)
         t1.start()
         log(
-            "▶ Started spam loop with 6 slots "
-            f"({SPAM_START_OFFSET}s start, {SPAM_GAP_BETWEEN_ACCOUNTS}s gap between slots)",
+            "▶ Started spam loop",
             session="system"
         )
     except Exception as e:
         log(f"❌ Failed to start spam loop thread: {e}", session="system")
 
     try:
-        t2 = threading.Thread(target=nc_loop, args=(accounts, titles_map), daemon=True)
+        t2 = threading.Thread(target=nc_loop, args=(accounts, groups, titles_map), daemon=True)
         t2.start()
         log(
-            "▶ Started nc loop with 6 slots "
-            f"({NC_START_OFFSET}s start, {NC_ACC_GAP}s gap between slots)",
+            "▶ Started nc loop",
             session="system"
         )
+
     except Exception as e:
         log(f"❌ Failed to start nc loop thread: {e}", session="system")
 
@@ -587,9 +569,12 @@ def run_bot_once():
 run_bot_once()
 
 if __name__ == "__main__":
+
     port = int(os.getenv("PORT", "10000"))
-    log(f"HTTP server starting on port {port}", session="system")
-    try:
-        app.run(host="0.0.0.0", port=port)
-    except Exception as e:
-        log(f"❌ Flask run failed: {e}", session="system")
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False
+    )
